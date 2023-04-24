@@ -1,0 +1,75 @@
+from airflow import DAG
+from airflow.operators.python_operator import PythonOperator
+from airflow.operators.postgres_operator import PostgresOperator
+from datetime import datetime, timedelta
+import os
+import re
+
+# Default arguments for the DAG
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,
+    'start_date': datetime(2023, 1, 1),
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5)
+}
+
+# Create the DAG instance
+dag = DAG(
+    'log_processing_dag',
+    default_args=default_args,
+    schedule_interval=timedelta(hours=1),  # Set the desired schedule interval
+)
+
+def process_logs():
+    logs_folder = '/path/to/airflow/logs/folder'  # Specify the path to the logs folder
+    tblcnt_values = []
+    single_quote_strings = []
+    dag_ids = []
+    task_ids = []
+
+    # Loop through the log files in the logs folder
+    for filename in os.listdir(logs_folder):
+        with open(os.path.join(logs_folder, filename), 'r') as file:
+            log_text = file.read()
+
+            # Extract TBLCNT value using regular expression
+            match_tblcnt = re.search(r"TBLCNT\s*=\s*(\d+)", log_text)
+            if match_tblcnt:
+                tblcnt_value = match_tblcnt.group(1)
+                tblcnt_values.append(tblcnt_value)
+
+            # Extract strings enclosed in single quotes followed by a semicolon using regular expression
+            matches_single_quote = re.findall(r"'([^']*)';", log_text)
+            if matches_single_quote:
+                single_quote_strings.extend(matches_single_quote)
+
+            # Capture dag_id and task_id
+            match_dag_id = re.search(r"Dag ID:\s*(\w+)", log_text)
+            if match_dag_id:
+                dag_id = match_dag_id.group(1)
+                dag_ids.append(dag_id)
+
+            match_task_id = re.search(r"Task ID:\s*(\w+)", log_text)
+            if match_task_id:
+                task_id = match_task_id.group(1)
+                task_ids.append(task_id)
+
+    # Insert extracted data into PostgreSQL table
+    # You can modify this part to suit your specific database setup
+    # Assumes you have a connection to a PostgreSQL database configured in Airflow
+    # and a table named 'logs_data' with columns 'tblcnt_value', 'single_quote_string', 'dag_id', and 'task_id'
+    insert_query = "INSERT INTO logs_data (tblcnt_value, single_quote_string, dag_id, task_id) VALUES (%s, %s, %s, %s)"
+    pg_insert_task = PostgresOperator(
+        task_id='insert_data_to_postgres',
+        postgres_conn_id='postgres_conn',  # Replace with your PostgreSQL connection ID
+        sql=insert_query,
+        parameters=[(tblcnt_value, single_quote_string, dag_id, task_id) for tblcnt_value, single_quote_string, dag_id, task_id in zip(tblcnt_values, single_quote_strings, dag_ids, task_ids)],
+        dag=dag
+    )
+
+# Define the task that will run the log processing function
+process_logs_task = PythonOperator(
+    task_id='process_logs_task',
+    python_callable=process_logs,
+    dag=dag
